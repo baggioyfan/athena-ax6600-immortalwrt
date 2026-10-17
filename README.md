@@ -113,10 +113,4 @@ opkg list-installed 2>/dev/null | grep argon || apk list -I 2>/dev/null | grep a
 - 系统起不来：U-Boot 恢复模式刷回原厂/旧固件，再 `fw_setenv` 按 `/opt/uboot-env.txt` 校正
 - open-box：解 `/opt/openbox-rootfs-parts.tar.gz` → `enable` + `start`（详见 `/opt/openbox-preserve.sh restore`）
 
-## 没编进去的东西（刷完自己装回）
 
-- iStore 全家（`luci-app-store` 等）—— 不在官方源
-- gowebdav —— 不在官方源
-- open-box —— 本来就在 `/opt`，不经过固件
-
-argon 已经编进去了，不需要重装。
