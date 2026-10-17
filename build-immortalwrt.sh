@@ -379,7 +379,7 @@ done
 log "收集并校验产物"
 mkdir -p "$ASSETS/out"
 find "$OUTDIR" -maxdepth 1 -type f \
-  \( -name "*${DEV}*" -o -name "profiles.json" -o -name "sha256sums" -o -name "*.manifest" \) \
+  \( -name "*${DEV}*" -o -name "profiles.json" -o -name "sha256sums" -o -name "*.manifest" -o -name "version.buildinfo" \) \
   -exec cp -f {} "$ASSETS/out/" \; 2>/dev/null || true
 
 [ "$(ls -1 "$ASSETS/out" | wc -l)" -gt 0 ] || die "out/ 是空的 —— 编译可能没跑到产生产物这一步，检查 $OUTDIR"
