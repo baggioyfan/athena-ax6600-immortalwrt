@@ -1,0 +1,104 @@
+name: Build Athena AX6600 (RE-CS-02)
+
+# 用法：
+#   1. 仓库必须是 public：public 仓库的 Actions 免费，runner 是 4 核 16G
+#   2. Actions 页面 → 左栏选本 workflow → Run workflow（**只有手动触发，push 不会自动编**）
+#   3. 跑完在本次 run 页面底部下载 artifact（sysupgrade.bin / factory.bin 都在里面）
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: '上游分支（owrt = PPE/DSA 新栈，带 2.5G；换 main 会退回旧栈）'
+        required: true
+        default: 'owrt'
+        type: choice
+        options:
+          - owrt
+          - main
+      jobs:
+        description: '并行编译线程数（4 核 runner 建议 4）'
+        required: false
+        default: '4'
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350          # 硬上限 360，留 10 分钟给打包上传
+    env:
+      WORK: ${{ github.workspace }}/immortalwrt
+      BRANCH: ${{ inputs.branch }}
+      JOBS: ${{ inputs.jobs }}
+
+    steps:
+      - name: 取出本仓库（seed.config + 构建脚本）
+        uses: actions/checkout@v4
+
+      - name: 释放磁盘（不腾必炸：qualcommax 全量要 20G+）
+        run: |
+          echo "腾出前："; df -h / | tail -1
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+                      /usr/local/lib/node_modules /opt/az /usr/share/swift \
+                      /usr/local/share/powershell /usr/share/miniconda 2>/dev/null || true
+          sudo apt-get clean
+          echo "腾出后："; df -h / | tail -1
+          AVAIL=$(df -Pk / | awk 'NR==2 {print int($4/1024/1024)}')
+          echo "可用空间：${AVAIL}G"
+          if [ "$AVAIL" -lt 18 ]; then
+            echo "::error::可用空间只有 ${AVAIL}G，qualcommax 全量编译需要 20G+，先别编"
+            exit 1
+          fi
+
+      - name: 加 4G swap
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 4G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
+      - name: 缓存 dl/（重建时省掉重复下载）
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/immortalwrt/dl
+          key: dl-${{ inputs.branch }}-qualcommax-v1
+          restore-keys: |
+            dl-${{ inputs.branch }}-
+            dl-
+
+      - name: 编译
+        run: bash build-immortalwrt.sh
+
+      - name: 列出产物
+        if: always()
+        run: ls -lh out/ 2>/dev/null || echo "out/ 为空（编译没跑到收集步骤）"
+
+      - name: 上传固件
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: immortalwrt-${{ inputs.branch }}-jdcloud_re-cs-02-r${{ github.run_number }}
+          path: |
+            out/*.bin
+            out/sha256sums
+            out/profiles.json
+            out/*.manifest
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 失败时把日志一并收走
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-r${{ github.run_number }}
+          path: |
+            immortalwrt/logs/
+            immortalwrt/bin/targets/qualcommax/ipq60xx/*.txt
+          if-no-files-found: ignore
+          retention-days: 7
