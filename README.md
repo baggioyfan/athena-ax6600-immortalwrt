@@ -1,12 +1,15 @@
 # 雅典娜 AX6600（JDCloud RE-CS-02）定制 ImmortalWrt
 
-给**京东云无线宝雅典娜 AX6600** 编的定制固件，只做三件事，别的都跟随上游默认。
+给**京东云无线宝雅典娜 AX6600** 编的定制固件。三处硬改动是固定的，应用包按 `APPS` 分档。
 
 | # | 改动 | 落地位置 | 为什么 |
 |---|------|---------|--------|
 | 1 | `kmod-nft-queue` | `config/seed.config` | 原固件 `GENERAL_AX6600.txt` 里写的是 `=n`，open-box 起不来/接管不了 nft 队列 |
-| 2 | argon 主题 | `config/seed.config` | 界面 |
+| 2 | argon 主题 | `config/seed.config` | 原固件本来就带（`luci-theme-argon 2.4.7` + 配置页 + 中文包），这里是保证换栈后仍在 |
 | 3 | 2.5G WAN | 源码 DTS（无需 config） | 旧 NSS 栈的 DTS 是 `phy-mode = "sgmii"`（1.25Gbps 线速，物理载不动 2.5G）；`owrt` 分支改成 `2500base-x` + `pcs-handle = <&uniphy1 0>` |
+
+> ⚠️ 这不是「在原固件上改三处」。换栈 = 换整棵源码树，原固件的包集必须在新源码里重建，
+> 所以有了下面的 `APPS` 三档。
 
 ## 源码
 
@@ -30,7 +33,16 @@ swport5: port@5 {
 
 **只有手动触发，push 不会自动编。**
 
-Actions → `Build Athena AX6600 (RE-CS-02)` → Run workflow（分支保持 `owrt`）。
+Actions → `Build Athena AX6600 (RE-CS-02)` → Run workflow（分支保持 `owrt`，选 `apps` 档位）。
+
+| `apps` | 内容 | 大概耗时 | 什么时候用 |
+|--------|------|---------|-----------|
+| `none` | 系统 + 三处改动 | 2~3h | 只想先确认 2.5G 通不通 |
+| `official`（默认） | 再加官方 feed 应用包约 60 项：adguardhome、docker 全家、samba4、ttyd、upnp、ddns、p910nd、sing-box、xray、iperf3… | 3~4h | 日常用，稳定优先 |
+| `full` | 再加 OpenClash、PassWall2、SSR、partexp、iStore（全部 clone 后按包名挑子目录，不加额外 feed） | 3~4h | 要贴近原固件 PLUS 的体验 |
+
+`full` 那一层的外部仓库当初是针对旧栈 + 旧版 luci 编的，在 `owrt` 上**没有验证过**。
+编不过就把档位降回 `official`——`none` / `official` 两档与它完全解耦，不受影响。
 
 跑完在 run 页面底部下载 artifact，里面有：
 
@@ -40,7 +52,9 @@ Actions → `Build Athena AX6600 (RE-CS-02)` → Run workflow（分支保持 `ow
 本地 / 自己的 Linux 机器也能跑：
 
 ```sh
-./build-immortalwrt.sh              # 默认 owrt
+./build-immortalwrt.sh                  # 默认 owrt + official
+APPS=none   ./build-immortalwrt.sh      # 只验 2.5G
+APPS=full   ./build-immortalwrt.sh      # 贴近原固件
 BRANCH=owrt WORK=$HOME/immortalwrt ./build-immortalwrt.sh
 ```
 
@@ -106,6 +120,22 @@ opkg list-installed 2>/dev/null | grep argon || apk list -I 2>/dev/null | grep a
 ```
 
 `ethtool wan` 显示 `Speed: 2500Mb/s` 才算这次定制成功；如果还是 1000，先确认对端交换机和网线（超五类以上），再看 `dmesg | grep -i qca8081`。
+
+## 和原固件（ones20250 PLUS）的差距
+
+原固件实测装了 542 个包，其中 **84 个是非 feeds/base 的应用层包**。换栈后它们的归属：
+
+| 类别 | 数量 | 说明 |
+|---|---|---|
+| 官方 feed 有 | ~60 | `apps-official.config` 已全部点名，`official` 档就带回来 |
+| 要第三方源 | ~12 | OpenClash / PassWall2 / SSR / partexp / iStore，`full` 档带回来 |
+| 新固件自带 | — | `luci-app-athena-led`（在 `DEVICE_PACKAGES`）、`luci-app-firewall`、`luci-app-package-manager`、`argon` |
+| **不能带** | 24 个 kmod | `kmod-qca-nss-dp/drv/ecm`、`kmod-qca-ssdk`、`nss-firmware`… 这些是 NSS 栈专属，新栈走 PPE，物理上没有对应包 |
+| **暂缺** | 4 | `gowebdav` 全家 —— 原固件来自非标准第三方源，官方 feed 没有，要保留得先确认可用源 |
+| 不需要 | 1 | `fullconenat-sonic`（自定义全锥 NAT 补丁包，新栈流程不同，未验证） |
+
+应用包的校验是**软校验**：编完会打印「点了 N 个、没进 .config 的 M 个」，不会静默丢失。
+基础三件（`kmod-nft-queue` / `argon` / `tproxy`+`tun`）是硬校验，缺一个就中止。
 
 ## 回滚
 

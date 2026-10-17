@@ -3,24 +3,32 @@
 # 为京东云雅典娜 AX6600（JDCloud RE-CS-02）编一版定制 ImmortalWrt：
 #
 #   源码  VIKINGYFY/immortalwrt @ owrt   —— 上游 PPE/DSA 新栈
-#   改动 1  kmod-nft-queue          （open-box 需要；旧固件里是 =n 编不进去）
+#   改动 1  kmod-nft-queue          （open-box 需要；原固件里是 =n 编不进去）
 #   改动 2  argon 主题 + 配置页
 #   改动 3  2.5G WAN                （靠源码 DTS 的 2500base-x，不是 config 开关）
+#
+# 应用包分三档（APPS）：
+#   none      只编系统 + 上面三处改动            —— 最快，用来先验证 2.5G
+#   official  再加官方 feed 的应用包（约 60 项）  —— 默认，稳定性可控
+#   full      再加第三方（OpenClash/PassWall2/partexp/iStore/SSR）
+#                                                 —— 最接近原固件，但兼容性未验证
 #
 # 运行环境：GNU/Linux（GitHub Actions 的 ubuntu runner，或本机 Docker 容器）。
 #   macOS 原生不能编 OpenWrt（构建系统要求大小写敏感文件系统）。
 #
 # 用法：
 #   ./build-immortalwrt.sh
-#   BRANCH=owrt WORK=$HOME/immortalwrt ./build-immortalwrt.sh
-#   PROXY=http://host.docker.internal:2080 ./build-immortalwrt.sh   # 容器里借宿主机代理
-#   V=s ./build-immortalwrt.sh                                      # 排错时看详细日志
+#   APPS=full ./build-immortalwrt.sh
+#   APPS=none BRANCH=owrt WORK=$HOME/immortalwrt ./build-immortalwrt.sh
+#   PROXY=http://host.docker.internal:2080 ./build-immortalwrt.sh
+#   V=s ./build-immortalwrt.sh
 #
 set -euo pipefail
 
 ASSETS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK="${WORK:-$HOME/immortalwrt}"
 BRANCH="${BRANCH:-owrt}"
+APPS="${APPS:-official}"
 JOBS="${JOBS:-$(nproc 2>/dev/null || echo 4)}"
 PROXY="${PROXY:-}"
 V="${V:-}"
@@ -33,13 +41,11 @@ OUTDIR="bin/targets/qualcommax/ipq60xx"
 log() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 die() { printf '\n\033[1;31m!! %s\033[0m\n' "$*" >&2; exit 1; }
 
-# 联网/编译类命令统一带超时（Linux 上有 timeout；没有就退化为直接跑）
 run_to() {
   local secs="$1"; shift
   if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"; else "$@"; fi
 }
 
-# 带重试：run_retry <次数> <单次超时秒> <命令...>
 run_retry() {
   local n="$1" to="$2"; shift 2
   local i=1
@@ -51,7 +57,14 @@ run_retry() {
   done
 }
 
+case "$APPS" in
+  none|official|full) ;;
+  *) die "APPS 只能是 none / official / full，收到：$APPS" ;;
+esac
+
 [ -f "$ASSETS/config/seed.config" ] || die "找不到 $ASSETS/config/seed.config"
+[ "$APPS" = none ] || [ -f "$ASSETS/config/apps-official.config" ] || die "找不到 apps-official.config"
+[ "$APPS" != full ] || [ -f "$ASSETS/config/apps-thirdparty.config" ] || die "找不到 apps-thirdparty.config"
 
 if [ -n "$PROXY" ]; then
   export http_proxy="$PROXY" https_proxy="$PROXY" HTTP_PROXY="$PROXY" HTTPS_PROXY="$PROXY"
@@ -59,11 +72,10 @@ if [ -n "$PROXY" ]; then
   echo "已为构建过程设置代理: $PROXY"
 fi
 
-log "1/7 获取源码 $REPO ($BRANCH) -> $WORK"
+log "1/8 获取源码 $REPO ($BRANCH) -> $WORK"
 
 # ⚠️ 缓存陷阱：Actions 的 dl/ 缓存恢复时会先把 $WORK 建出来（里面只有 dl/），
 #    于是 git clone 直接报 "destination path already exists"。
-#    处理：先把整个目录挪走，clone 完再把 dl/ 归位。
 STASH=""
 if [ -d "$WORK" ] && [ ! -d "$WORK/.git" ]; then
   STASH="$(dirname "$WORK")/.stash-$(basename "$WORK").$$"
@@ -88,13 +100,13 @@ if [ -n "$STASH" ] && [ -d "$STASH/dl" ]; then
 fi
 if [ -n "$STASH" ]; then
   rmdir "$STASH/dl" 2>/dev/null || true
-  rmdir "$STASH" 2>/dev/null || echo "  保留 ${STASH}（里面还有别的东西，没动它）"
+  rmdir "$STASH" 2>/dev/null || echo "  保留 ${STASH}"
 fi
 cd "$WORK"
 
 echo "  源码版本：$(git log -1 --oneline 2>/dev/null || echo unknown)"
 
-log "2/7 校验源码：WAN 口是不是真的 2500base-x"
+log "2/8 校验源码：WAN 口是不是真的 2500base-x"
 
 [ -f "$DTS" ] || die "$DTS 不存在 —— 这个分支可能没带 RE-CS-02 支持，先确认分支选对了"
 python3 - "$DTS" <<'PY' || exit 1
@@ -102,7 +114,6 @@ import re, sys
 path = sys.argv[1]
 src = open(path, encoding="utf-8").read()
 
-# 提取 swport5 / port@5 的块（花括号配平），只看 WAN 这一段
 m = re.search(r'(swport5:\s*port@5\s*\{)', src)
 if not m:
     sys.exit("!! DTS 里找不到 swport5/port@5 —— 端口定义被改过，停下")
@@ -130,14 +141,58 @@ if bad:
 print("  ✓ WAN = 2500base-x + uniphy1 PCS")
 PY
 
-log "3/7 更新 feeds"
+log "3/8 拉取第三方包（APPS=$APPS）"
+
+# 从一个仓库里挑出某个子目录，放进 package/
+take_pkg() {
+  local tmp="$1" name="$2" src
+  src=$(find "$tmp" -maxdepth 4 -type d -name "$name" -not -path "*/.git/*" -print -quit 2>/dev/null || true)
+  if [ -n "$src" ]; then
+    rm -rf "package/$name"
+    cp -rf "$src" package/
+    echo "  + package/$name"
+  else
+    echo "  ! 在 $tmp 里没找到 $name，跳过"
+  fi
+}
+
+fetch_repo() {   # <repo-url> <tmp-dir> [要取的包名...]
+  local url="$1" tmp="$2"; shift 2
+  rm -rf "$tmp"
+  if ! run_retry 2 600 git clone --depth 1 --single-branch "$url" "$tmp"; then
+    echo "  ! 拉取失败，跳过整组：$url"
+    return 0
+  fi
+  local n
+  for n in "$@"; do take_pkg "$tmp" "$n"; done
+}
+
+if [ "$APPS" = full ]; then
+  # 一个 feed 都不加，全部 clone 后按包名挑子目录 —— 避免同名包双重定义
+  fetch_repo "https://github.com/vernesong/OpenClash.git" /tmp/tp-openclash luci-app-openclash
+  fetch_repo "https://github.com/Openwrt-Passwall/openwrt-passwall2.git" /tmp/tp-passwall2 luci-app-passwall2
+  fetch_repo "https://github.com/sirpdboy/luci-app-partexp.git" /tmp/tp-partexp luci-app-partexp
+  fetch_repo "https://github.com/istoreos/istore.git" /tmp/tp-istore luci-app-store luci-lib-taskd luci-lib-xterm taskd
+  fetch_repo "https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git" /tmp/tp-pw-pkgs shadowsocksr-libev
+else
+  echo "  跳过"
+fi
+
+log "4/8 更新 feeds"
 run_retry 3 1200 ./scripts/feeds update -a
 run_retry 3 1200 ./scripts/feeds install -a
 
-log "4/7 生成 .config（seed → defconfig）"
+log "5/8 生成 .config（seed + APPS=$APPS）"
 cp -f "$ASSETS/config/seed.config" .config
+if [ "$APPS" != none ]; then
+  cat "$ASSETS/config/apps-official.config" >> .config
+fi
+if [ "$APPS" = full ]; then
+  cat "$ASSETS/config/apps-thirdparty.config" >> .config
+fi
 make defconfig
 
+log "6/8 校验 .config"
 sel() { grep -q "^$1=y$" .config && echo y || echo n; }
 
 DEV_A=$(sel "CONFIG_TARGET_qualcommax_ipq60xx_DEVICE_${DEV}")
@@ -145,27 +200,44 @@ DEV_B=$(sel "CONFIG_TARGET_DEVICE_qualcommax_ipq60xx_DEVICE_${DEV}")
 echo "  设备选中：$DEV_A / $DEV_B"
 [ "$DEV_A" = y ] || [ "$DEV_B" = y ] || die "设备没被选上：jdcloud_re-cs-02"
 
-# 包校验（自证前进）：Kconfig 遇到不存在的包名会静默丢掉这行，
-# 不校验就得等编完刷进机器才发现"主题/队列没进去"。
+# 基础三件：硬校验（缺了这次就白编了）
 for pkg in kmod-nft-queue luci-theme-argon luci-app-argon-config kmod-tun kmod-nft-tproxy; do
   s=$(sel "CONFIG_PACKAGE_${pkg}")
-  echo "  包 ${pkg}: ${s}"
-  [ "$s" = y ] || die "包没被选上：${pkg} —— 检查 seed.config 的包名与当前分支的 feeds"
+  echo "  必需 ${pkg}: ${s}"
+  [ "$s" = y ] || die "必需包没被选上：${pkg}"
 done
 
-# 语言包只做提醒（不同分支的 i18n 包名后缀可能变）
-for pkg in luci-i18n-argon-config-zh-cn luci-i18n-base-zh-cn; do
-  s=$(sel "CONFIG_PACKAGE_${pkg}")
-  echo "  包 ${pkg}: ${s}（不致命）"
-done
+# 应用包：软校验，只报告不中断（包名在分支间偶有差异）
+missing_report() {
+  local f="$1" pkg miss=0 total=0
+  while IFS= read -r line; do
+    pkg=$(printf '%s' "$line" | sed -n 's/^CONFIG_PACKAGE_\(.*\)=y$/\1/p')
+    [ -n "$pkg" ] || continue
+    total=$((total+1))
+    if ! grep -qF "CONFIG_PACKAGE_${pkg}=y" .config; then
+      echo "    ✗ $pkg"
+      miss=$((miss+1))
+    fi
+  done < "$f"
+  echo "  点了 $total 个，没进 .config 的 $miss 个"
+}
 
-log "5/7 下载源码包（国内网络容易卡，失败重试）"
+if [ "$APPS" != none ]; then
+  echo "  官方应用包："
+  missing_report "$ASSETS/config/apps-official.config"
+fi
+if [ "$APPS" = full ]; then
+  echo "  第三方包："
+  missing_report "$ASSETS/config/apps-thirdparty.config"
+fi
+
+log "7/8 下载源码包（国内网络容易卡，失败重试）"
 run_retry 3 3600 make -j"$JOBS" download
 
-log "6/7 编译（首次 1.5~3 小时）"
-run_to 10800 make -j"$JOBS" ${V:+"V=$V"}
+log "8/8 编译（首次 2~4 小时，取决于 APPS 档位）"
+run_to 12600 make -j"$JOBS" ${V:+"V=$V"}
 
-log "7/7 收集并校验产物"
+log "收集并校验产物"
 mkdir -p "$ASSETS/out"
 find "$OUTDIR" -maxdepth 1 -type f \
   \( -name "*${DEV}*" -o -name "profiles.json" -o -name "sha256sums" -o -name "*.manifest" \) \
@@ -187,6 +259,8 @@ if tar tf "$SU" >/tmp/su.list 2>/dev/null || tar tzf "$SU" >/tmp/su.list 2>/dev/
 else
   echo "  ! 无法读取包内容（tar 列不出），请人工确认"
 fi
+
+ls -lh "$SU"
 
 (cd "$ASSETS/out" && [ -f sha256sums ] && sha256sum -c sha256sums 2>/dev/null | tail -3) || true
 ls -lh "$ASSETS/out"

@@ -16,6 +16,15 @@ on:
         options:
           - owrt
           - main
+      apps:
+        description: '应用包档位：none 只验 2.5G / official 官方应用包 / full 再加第三方向原固件看齐'
+        required: true
+        default: 'official'
+        type: choice
+        options:
+          - official
+          - none
+          - full
       jobs:
         description: '并行编译线程数（4 核 runner 建议 4）'
         required: false
@@ -32,6 +41,7 @@ jobs:
     env:
       WORK: ${{ github.workspace }}/immortalwrt
       BRANCH: ${{ inputs.branch }}
+      APPS: ${{ inputs.apps }}
       JOBS: ${{ inputs.jobs }}
 
     steps:
@@ -83,7 +93,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: immortalwrt-${{ inputs.branch }}-jdcloud_re-cs-02-r${{ github.run_number }}
+          name: immortalwrt-${{ inputs.branch }}-${{ inputs.apps }}-jdcloud_re-cs-02-r${{ github.run_number }}
           path: |
             out/*.bin
             out/sha256sums
