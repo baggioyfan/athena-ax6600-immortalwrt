@@ -9,9 +9,9 @@
 #
 # 应用包分三档（APPS）：
 #   none      只编系统 + 上面三处改动            —— 最快，用来先验证 2.5G
-#   official  再加官方 feed 的应用包（约 60 项）  —— 默认，稳定性可控
-#   full      再加第三方（OpenClash/PassWall2/partexp/iStore/SSR）
-#                                                 —— 最接近原固件，但兼容性未验证
+#   official  再加官方 feed 的应用包（约 60 项）
+#   full      再加第三方（OpenClash / PassWall2 / SSR / partexp）—— 复刻 PLUS
+#             （iStore、gowebdav 不编；NSS 栈 kmod 新栈不存在，也不需要替代）
 #
 # 运行环境：GNU/Linux（GitHub Actions 的 ubuntu runner，或本机 Docker 容器）。
 #   macOS 原生不能编 OpenWrt（构建系统要求大小写敏感文件系统）。
@@ -19,8 +19,7 @@
 # 用法：
 #   ./build-immortalwrt.sh
 #   APPS=full ./build-immortalwrt.sh
-#   APPS=none BRANCH=owrt WORK=$HOME/immortalwrt ./build-immortalwrt.sh
-#   PROXY=http://host.docker.internal:2080 ./build-immortalwrt.sh
+#   APPS=full NODOWNLOAD=1 ./build-immortalwrt.sh
 #   V=s ./build-immortalwrt.sh
 #
 set -euo pipefail
@@ -28,11 +27,13 @@ set -euo pipefail
 ASSETS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK="${WORK:-$HOME/immortalwrt}"
 BRANCH="${BRANCH:-owrt}"
-APPS="${APPS:-official}"
+APPS="${APPS:-full}"
 JOBS="${JOBS:-$(nproc 2>/dev/null || echo 4)}"
 PROXY="${PROXY:-}"
 V="${V:-}"
 REPO="${REPO:-https://github.com/VIKINGYFY/immortalwrt.git}"
+BUILD_LOG="${BUILD_LOG:-$(dirname "${WORK:-$HOME/immortalwrt}")/build.log}"
+RETRY_ON_FAIL="${RETRY_ON_FAIL:-1}"
 
 DEV="jdcloud_re-cs-02"
 DTS="target/linux/qualcommax/dts/ipq6010-re-cs-02.dts"
@@ -52,6 +53,18 @@ run_retry() {
   while true; do
     if run_to "$to" "$@"; then return 0; fi
     if [ "$i" -ge "$n" ]; then die "重试 $n 次仍失败: $*"; fi
+    echo "  第 $i 次失败，5 秒后重试: $*"
+    sleep 5; i=$((i+1))
+  done
+}
+
+# 同上，但失败只返回非 0，不中止脚本（第三方仓库拉不到不该拖垮整轮）
+run_retry_soft() {
+  local n="$1" to="$2"; shift 2
+  local i=1
+  while true; do
+    if run_to "$to" "$@"; then return 0; fi
+    if [ "$i" -ge "$n" ]; then return 1; fi
     echo "  第 $i 次失败，5 秒后重试: $*"
     sleep 5; i=$((i+1))
   done
@@ -159,7 +172,7 @@ take_pkg() {
 fetch_repo() {   # <repo-url> <tmp-dir> [要取的包名...]
   local url="$1" tmp="$2"; shift 2
   rm -rf "$tmp"
-  if ! run_retry 2 600 git clone --depth 1 --single-branch "$url" "$tmp"; then
+  if ! run_retry_soft 2 600 git clone --depth 1 --single-branch "$url" "$tmp"; then
     echo "  ! 拉取失败，跳过整组：$url"
     return 0
   fi
@@ -172,8 +185,11 @@ if [ "$APPS" = full ]; then
   fetch_repo "https://github.com/vernesong/OpenClash.git" /tmp/tp-openclash luci-app-openclash
   fetch_repo "https://github.com/Openwrt-Passwall/openwrt-passwall2.git" /tmp/tp-passwall2 luci-app-passwall2
   fetch_repo "https://github.com/sirpdboy/luci-app-partexp.git" /tmp/tp-partexp luci-app-partexp
-  fetch_repo "https://github.com/istoreos/istore.git" /tmp/tp-istore luci-app-store luci-lib-taskd luci-lib-xterm taskd
   fetch_repo "https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git" /tmp/tp-pw-pkgs shadowsocksr-libev
+
+  for d in luci-app-openclash luci-app-passwall2 luci-app-partexp shadowsocksr-libev; do
+    [ -d "package/$d" ] || echo "  !! package/$d 不存在（后面 defconfig 会把对应 CONFIG 丢掉）"
+  done
 else
   echo "  跳过"
 fi
@@ -200,12 +216,41 @@ DEV_B=$(sel "CONFIG_TARGET_DEVICE_qualcommax_ipq60xx_DEVICE_${DEV}")
 echo "  设备选中：$DEV_A / $DEV_B"
 [ "$DEV_A" = y ] || [ "$DEV_B" = y ] || die "设备没被选上：jdcloud_re-cs-02"
 
+# 设备默认包（WiFi 固件 / LED 屏）不能被 seed 覆盖掉，否则刷完没 WiFi
+for pkg in ipq-wifi-jdcloud_re-cs-02 ath11k-firmware-qcn9074-ddwrt luci-app-athena-led; do
+  s=$(sel "CONFIG_PACKAGE_${pkg}")
+  echo "  设备默认 ${pkg}: ${s}"
+  [ "$s" = y ] || die "设备默认包被覆盖掉了：${pkg} —— 检查 seed.config 里 CONFIG_TARGET_DEVICE_PACKAGES 那行"
+done
+
 # 基础三件：硬校验（缺了这次就白编了）
 for pkg in kmod-nft-queue luci-theme-argon luci-app-argon-config kmod-tun kmod-nft-tproxy; do
   s=$(sel "CONFIG_PACKAGE_${pkg}")
   echo "  必需 ${pkg}: ${s}"
   [ "$s" = y ] || die "必需包没被选上：${pkg}"
 done
+
+# 互斥变体：两个都 y 会导致镜像里两个包抢同一个虚拟名，安装期就崩。
+# 这类错误在编译到 90% 才暴露，所以在动手编之前就拦。
+if [ "$APPS" = full ]; then
+  echo "  --- 互斥变体 ---"
+  for pair in "dnsmasq-full:dnsmasq" "ip-full:ip-tiny"; do
+    want="${pair%%:*}"; avoid="${pair##*:}"
+    a=$(sel "CONFIG_PACKAGE_${want}"); b=$(sel "CONFIG_PACKAGE_${avoid}")
+    echo "  ${want}=${a}  ${avoid}=${b}"
+    [ "$a" = y ] || die "${want} 没被选上 —— full 档必须要它"
+    [ "$b" = n ] || die "${avoid} 仍是 y，会和 ${want} 冲突（两个都 PROVIDES 同一虚拟包）"
+  done
+
+  echo "  --- full 档核心包（硬校验）---"
+  for pkg in luci-app-openclash luci-app-passwall2 luci-app-partexp \
+             dnsmasq_full_nftset kmod-nft-socket kmod-nft-nat ruby ruby-yaml \
+             shadowsocksr-libev-ssr-local shadowsocksr-libev-ssr-redir; do
+    s=$(sel "CONFIG_PACKAGE_${pkg}")
+    echo "  ${pkg}: ${s}"
+    [ "$s" = y ] || die "full 档核心包没被选上：${pkg}（编译前拦下，不用白等 3 小时）"
+  done
+fi
 
 # 应用包：软校验，只报告不中断（包名在分支间偶有差异）
 missing_report() {
@@ -231,11 +276,96 @@ if [ "$APPS" = full ]; then
   missing_report "$ASSETS/config/apps-thirdparty.config"
 fi
 
-log "7/8 下载源码包（国内网络容易卡，失败重试）"
-run_retry 3 3600 make -j"$JOBS" download
+log "7/8 下载源码包（国内网络容易卡；这一阶段失败不致命）"
+if [ "${NODOWNLOAD:-0}" = 1 ]; then
+  echo "  NODOWNLOAD=1，跳过"
+else
+  run_to 5400 make -j"$JOBS" download || echo "  ! 有包没下全，交给编译阶段自己重试"
+fi
 
-log "8/8 编译（首次 2~4 小时，取决于 APPS 档位）"
-run_to 12600 make -j"$JOBS" ${V:+"V=$V"}
+log "8/8 编译（首次 2~5 小时，取决于 APPS 档位）"
+
+# 编译失败时 OpenWrt 会打印形如
+#   make[3]: *** [Makefile:88: /…/build_dir/target-…/luci-app-xxx-1.2.3/.built] Error 1
+# 从日志里把这几个目录名抠出来，按"去掉版本号"映射回包名。
+# 只对**非核心包**做一次自动剔除重编：核心包挂了就正常失败，不掩盖问题。
+CORE_PKGS="luci-app-openclash luci-app-passwall2 luci-app-partexp shadowsocksr-libev kmod-nft-queue"
+
+extract_failed() {
+  [ -f "$BUILD_LOG" ] || return 0
+  grep -oE '/build_dir/[^ /]+/[A-Za-z0-9._+-]+/\.built' "$BUILD_LOG" 2>/dev/null \
+    | sed -E 's#^.*/build_dir/[^/]+/##; s#/\.built$##; s#-[0-9].*$##' \
+    | sort -u
+}
+
+drop_pkg() {   # 把某个包的 CONFIG 及其子包/变体（-xxx、_xxx）一起关掉
+  local p="$1"
+  sed -i -E "s#^CONFIG_PACKAGE_${p}=y#\# CONFIG_PACKAGE_${p} is not set#" .config
+  sed -i -E "s#^CONFIG_PACKAGE_(${p}[-_][A-Za-z0-9_.+-]+)=y#\# CONFIG_PACKAGE_\1 is not set#" .config
+  ! grep -q "^CONFIG_PACKAGE_${p}=y$" .config
+}
+
+build_once() {
+  local rc=0
+  set +e
+  if [ -n "$V" ]; then
+    make -j"$JOBS" V="$V" 2>&1 | tee "$BUILD_LOG"
+  else
+    make -j"$JOBS" 2>&1 | tee "$BUILD_LOG"
+  fi
+  rc=${PIPESTATUS[0]}
+  set -e
+  return "$rc"
+}
+
+attempt=1
+while true; do
+  if build_once; then
+    echo "  ✓ 编译完成"
+    break
+  fi
+
+  if [ "$RETRY_ON_FAIL" != 1 ] || [ "$attempt" -ge 2 ]; then
+    echo
+    echo "!! 编译失败（第 $attempt 次）。构建日志：$BUILD_LOG"
+    echo "   可疑包："
+    extract_failed | sed 's/^/     /' || true
+    echo "   最后 40 行："
+    tail -40 "$BUILD_LOG" 2>/dev/null | sed 's/^/     /' || true
+    exit 1
+  fi
+
+  failed=$(extract_failed | tr '\n' ' ')
+  echo
+  echo "!! 第 $attempt 次编译失败，日志里的包：${failed:-<识别不出>}"
+  if [ -z "$failed" ]; then
+    echo "   识别不出失败包，不做自动剔除，直接报错"
+    tail -40 "$BUILD_LOG" | sed 's/^/     /'
+    exit 1
+  fi
+
+  dropped=0
+  for p in $failed; do
+    if printf '%s ' $CORE_PKGS | grep -qF "$p "; then
+      echo "   $p 是核心包，不自动剔除（要它就得改代码，不能靠删）"
+      continue
+    fi
+    if drop_pkg "$p"; then
+      echo "   已剔除：$p（保留已编译产物，重编只补缺失部分）"
+      dropped=$((dropped+1))
+    fi
+  done
+
+  if [ "$dropped" -eq 0 ]; then
+    echo "   没有可剔除的包，直接报错"
+    tail -40 "$BUILD_LOG" | sed 's/^/     /'
+    exit 1
+  fi
+
+  echo "   重新 make defconfig 后续编（已编译的包不会重编）"
+  make defconfig >/dev/null 2>&1 || true
+  attempt=$((attempt+1))
+done
 
 log "收集并校验产物"
 mkdir -p "$ASSETS/out"
@@ -260,6 +390,20 @@ else
   echo "  ! 无法读取包内容（tar 列不出），请人工确认"
 fi
 
+# 关键包是否真的进了镜像（manifest 是最终真相，不是 .config）
+MAN=$(ls "$ASSETS/out/"*.manifest 2>/dev/null | head -1)
+if [ -n "$MAN" ]; then
+  echo "  镜像内关键包抽查："
+  for pkg in kmod-nft-queue luci-theme-argon luci-app-athena-led; do
+    if grep -qiE "^${pkg} " "$MAN"; then echo "    ✓ $pkg"; else echo "    ✗ $pkg 不在 manifest 里"; fi
+  done
+  if [ "$APPS" = full ]; then
+    for pkg in luci-app-openclash luci-app-passwall2 dnsmasq-full ip-full; do
+      if grep -qiE "^${pkg} " "$MAN"; then echo "    ✓ $pkg"; else echo "    ✗ $pkg 不在 manifest 里"; fi
+    done
+  fi
+fi
+
 ls -lh "$SU"
 
 (cd "$ASSETS/out" && [ -f sha256sums ] && sha256sum -c sha256sums 2>/dev/null | tail -3) || true
@@ -271,7 +415,7 @@ cat <<'EOF'
   *-squashfs-sysupgrade.bin   ← 在 OpenWrt 里 sysupgrade（保留配置）
   *-factory.bin               ← 只在救砖/U-Boot 恢复时用
 
-刷机前必做（见 README「刷机前 10 分钟」）：
+刷机前必做：
   1. 设备上备份配置：  sysupgrade -b /opt/config-before-owrt.tar.gz
   2. 备份 U-Boot 环境：fw_printenv > /opt/uboot-env.txt
   3. 确认 /opt/openbox-rootfs-parts.tar.gz 在（open-box 的根 fs 部分）

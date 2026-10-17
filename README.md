@@ -37,12 +37,16 @@ Actions → `Build Athena AX6600 (RE-CS-02)` → Run workflow（分支保持 `ow
 
 | `apps` | 内容 | 大概耗时 | 什么时候用 |
 |--------|------|---------|-----------|
+| `full`（默认） | 官方应用包约 60 项 **+** OpenClash、PassWall2、SSR、partexp | 3.5~5h | 贴近原固件 PLUS，一次到位 |
+| `official` | 只加官方 feed 应用包约 60 项：adguardhome、docker 全家、samba4、ttyd、upnp、ddns、p910nd、sing-box、xray、iperf3… | 3~4h | 出问题时的退路 |
 | `none` | 系统 + 三处改动 | 2~3h | 只想先确认 2.5G 通不通 |
-| `official`（默认） | 再加官方 feed 应用包约 60 项：adguardhome、docker 全家、samba4、ttyd、upnp、ddns、p910nd、sing-box、xray、iperf3… | 3~4h | 日常用，稳定优先 |
-| `full` | 再加 OpenClash、PassWall2、SSR、partexp、iStore（全部 clone 后按包名挑子目录，不加额外 feed） | 3~4h | 要贴近原固件 PLUS 的体验 |
 
-`full` 那一层的外部仓库当初是针对旧栈 + 旧版 luci 编的，在 `owrt` 上**没有验证过**。
-编不过就把档位降回 `official`——`none` / `official` 两档与它完全解耦，不受影响。
+`full` 那一层的外部仓库当初是针对旧栈 + 旧版 luci 编的，在 `owrt` 上**没有官方保证**。
+脚本为此加了两道保险：编译前硬校验 10 个核心包是否真的进了 `.config`；编译中若某个**非核心包**挂掉，
+会自动把它从 `.config` 剔除后原地续编（已编译产物保留，只补缺失部分），不浪费整轮时间。
+
+`full` **不含**：iStore 全家、gowebdav 全家（都明确不要）；NSS 栈的 24 个 kmod（新栈物理上不存在，
+也不需要替代品——PPE + mainline DSA + 内核 flowtable 就是加速路径）。
 
 跑完在 run 页面底部下载 artifact，里面有：
 
@@ -52,18 +56,25 @@ Actions → `Build Athena AX6600 (RE-CS-02)` → Run workflow（分支保持 `ow
 本地 / 自己的 Linux 机器也能跑：
 
 ```sh
-./build-immortalwrt.sh                  # 默认 owrt + official
+./build-immortalwrt.sh                  # 默认 owrt + full
+APPS=official ./build-immortalwrt.sh    # 退路：只官方应用包
 APPS=none   ./build-immortalwrt.sh      # 只验 2.5G
-APPS=full   ./build-immortalwrt.sh      # 贴近原固件
 BRANCH=owrt WORK=$HOME/immortalwrt ./build-immortalwrt.sh
 ```
 
-脚本会在编译前做这些硬校验（任何一条不过就立刻退出，不浪费两小时）：
+脚本会在编译前做这些硬校验（任何一条不过就立刻退出，不浪费几小时）：
 
 1. DTS 的 WAN 段确实是 `2500base-x` + `uniphy1` + `label="wan"`
 2. `.config` 里设备 `jdcloud_re-cs-02` 被选中
-3. `kmod-nft-queue` / `luci-theme-argon` / `luci-app-argon-config` / `kmod-tun` / `kmod-nft-tproxy` 都 `=y`
-4. 编完检查 sysupgrade 包里**同时有 kernel 和 rootfs**（只换 rootfs 不换内核会变砖）
+3. 设备自带包没被覆盖：`ipq-wifi-jdcloud_re-cs-02`、`ath11k-firmware-qcn9074-ddwrt`、`luci-app-athena-led`
+   （缺了刷完没 WiFi / LED 屏黑）
+4. `kmod-nft-queue` / `luci-theme-argon` / `luci-app-argon-config` / `kmod-tun` / `kmod-nft-tproxy` 都 `=y`
+5. 互斥变体没打架：`dnsmasq-full=y` 且 `dnsmasq=n`、`ip-full=y` 且 `ip-tiny=n`
+   （这两组各自 PROVIDES 同一个虚拟包，同时选上会在镜像组装期才崩）
+6. `full` 档的 10 个核心包都 `=y`：OpenClash / PassWall2 / partexp / `dnsmasq_full_nftset` /
+   `kmod-nft-socket` / `kmod-nft-nat` / `ruby` / `ruby-yaml` / SSR local+redir
+7. 编完检查 sysupgrade 包里**同时有 kernel 和 rootfs**（只换 rootfs 不换内核会变砖）
+8. 编完从 `.manifest` 抽查关键包是否真进了镜像（`.config` 里 `=y` 不等于镜像里有）
 
 ## 刷机前 10 分钟
 
@@ -127,11 +138,11 @@ opkg list-installed 2>/dev/null | grep argon || apk list -I 2>/dev/null | grep a
 
 | 类别 | 数量 | 说明 |
 |---|---|---|
-| 官方 feed 有 | ~60 | `apps-official.config` 已全部点名，`official` 档就带回来 |
-| 要第三方源 | ~12 | OpenClash / PassWall2 / SSR / partexp / iStore，`full` 档带回来 |
+| 官方 feed 有 | ~60 | `apps-official.config` 已全部点名 |
+| 要第三方源 | ~8 | OpenClash / PassWall2 / SSR / partexp，`full` 档带回来 |
 | 新固件自带 | — | `luci-app-athena-led`（在 `DEVICE_PACKAGES`）、`luci-app-firewall`、`luci-app-package-manager`、`argon` |
-| **不能带** | 24 个 kmod | `kmod-qca-nss-dp/drv/ecm`、`kmod-qca-ssdk`、`nss-firmware`… 这些是 NSS 栈专属，新栈走 PPE，物理上没有对应包 |
-| **暂缺** | 4 | `gowebdav` 全家 —— 原固件来自非标准第三方源，官方 feed 没有，要保留得先确认可用源 |
+| **不能带** | 24 个 kmod | `kmod-qca-nss-dp/drv/ecm`、`kmod-qca-ssdk`、`nss-firmware`… NSS 栈专属，新栈走 PPE，物理上没有对应包，也不需要替代 |
+| **明确不要** | 8 | iStore 全家（`luci-app-store`/`taskd`/`luci-lib-taskd`/`luci-lib-xterm`）、gowebdav 全家（官方 feed 无此包） |
 | 不需要 | 1 | `fullconenat-sonic`（自定义全锥 NAT 补丁包，新栈流程不同，未验证） |
 
 应用包的校验是**软校验**：编完会打印「点了 N 个、没进 .config 的 M 个」，不会静默丢失。
