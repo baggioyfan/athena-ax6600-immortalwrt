@@ -289,7 +289,9 @@ log "8/8 编译（首次 2~5 小时，取决于 APPS 档位）"
 #   make[3]: *** [Makefile:88: /…/build_dir/target-…/luci-app-xxx-1.2.3/.built] Error 1
 # 从日志里把这几个目录名抠出来，按"去掉版本号"映射回包名。
 # 只对**非核心包**做一次自动剔除重编：核心包挂了就正常失败，不掩盖问题。
-CORE_PKGS="luci-app-openclash luci-app-passwall2 luci-app-partexp shadowsocksr-libev kmod-nft-queue"
+# SSR 故意不算核心：它是原固件遗留的老包，编不过时关掉 passwall2 的 SSR 选项即可，
+# 不影响 PassWall2 的其余功能（xray / sing-box / ss-rust 都还在）。
+CORE_PKGS="luci-app-openclash luci-app-passwall2 luci-app-partexp kmod-nft-queue"
 
 extract_failed() {
   [ -f "$BUILD_LOG" ] || return 0
@@ -302,6 +304,13 @@ drop_pkg() {   # 把某个包的 CONFIG 及其子包/变体（-xxx、_xxx）一�
   local p="$1"
   sed -i -E "s#^CONFIG_PACKAGE_${p}=y#\# CONFIG_PACKAGE_${p} is not set#" .config
   sed -i -E "s#^CONFIG_PACKAGE_(${p}[-_][A-Za-z0-9_.+-]+)=y#\# CONFIG_PACKAGE_\1 is not set#" .config
+  # SSR 是 passwall2 用 select 拉进来的：光删包没意义，defconfig 会再拉回来，
+  # 必须同时关掉 passwall2 的那个编译开关。
+  if [ "$p" = shadowsocksr-libev ]; then
+    sed -i -E \
+      "s#^CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_ShadowsocksR_Libev_Client=y#\# CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_ShadowsocksR_Libev_Client is not set#" \
+      .config
+  fi
   ! grep -q "^CONFIG_PACKAGE_${p}=y$" .config
 }
 
