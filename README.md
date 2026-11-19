@@ -51,7 +51,7 @@ swport5: port@5 {
 | `apps` | 内容 | 大概耗时 | 什么时候用 |
 |--------|------|---------|-----------|
 | `full`（默认） | 官方应用包约 60 项 **+** OpenClash、PassWall2、SSR、partexp | 3.5~5h | 贴近原固件 PLUS，一次到位 |
-| `official` | 只加官方 feed 应用包约 60 项：adguardhome、docker 全家、samba4、ttyd、upnp、ddns、p910nd、sing-box、xray、iperf3… | 3~4h | 出问题时的退路 |
+| `official` | 只加官方 feed 应用包约 60 项：adguardhome、docker 全家、samba4、ttyd、upnp、ddns、p910nd、sing-box、xray、iperf3、wol… | 3~4h | 出问题时的退路 |
 | `none` | 系统 + 三处改动 + `seed.config` 里的优化项 | 2~3h | 只想先确认 2.5G 通不通 |
 
 `full` 那一层的外部仓库当初是针对旧栈 + 旧版 luci 编的，在 `owrt` 上**没有官方保证**。
@@ -172,6 +172,31 @@ RETRY_ON_FAIL=0 ./build-immortalwrt.sh  # 编挂了直接停，不做自动剔�
 | `CONFIG_PACKAGE_luci-app-fullconenat-sonic=y` | 这个包**不存在**（`immortalwrt/luci` 里 404），界面内嵌在 firewall4 |
 | `CONFIG_DEVEL` / `CCACHE` / `TARGET_MULTI_PROFILE` / `TARGET_PER_DEVICE_ROOTFS` | 构建期开关，对成品无收益 |
 | `samba4` / `arpbind` / `autoreboot` / `https-dns-proxy` / `sentinel` | 个人偏好；`samba4`、`arpbind`、`autoreboot` 在 `apps-official.config` 里已有 |
+
+### 关于 WOL（只带 `etherwake`，不带 `wakeonlan`）
+
+`apps-official.config` 里只点名了两项：
+
+```config
+CONFIG_PACKAGE_luci-app-wol=y
+CONFIG_PACKAGE_etherwake=y
+```
+
+**故意没加 `wakeonlan`**。两者功能重叠（都是发 magic packet），区别在实现：
+
+| 包 | 实现 | 连带依赖 | 体积 |
+|---|---|---|---|
+| `etherwake` | C，只依赖 libc | 无 | 极小 |
+| `wakeonlan` | **Perl 脚本** | `perl` 5.40 + 22 个 `perlbase-*` | 实测 **3667 KiB** |
+
+2026-11-19 在设备上 `apk add luci-app-wol wakeonlan` 实测：`luci-app-wol` 依赖只有
+`etherwake / libc / luci-base`，**根本不需要 `wakeonlan`**；而 `wakeonlan` 一口气拉了
+perl 全家。所以固件里只留前者，省下的 3.6MB 比命令行版那点便利值钱。
+
+入口在 LuCI 的 **服务 → Wake on LAN**（`admin/services/wol`，`order: 90`），不是「网络」菜单。
+包内文件：`/usr/share/luci/menu.d/luci-app-wol.json`、`/usr/share/rpcd/acl.d/luci-app-wol.json`、
+`/usr/share/rpcd/ucode/luci.wol`、`/www/luci-static/resources/view/wol.js`、`/etc/config/luci-wol`。
+装完必须 `/etc/init.d/rpcd restart`，否则菜单项不出现。
 
 ### 关于 `fullconenat-sonic`
 
