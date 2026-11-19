@@ -106,8 +106,8 @@ RETRY_ON_FAIL=0 ./build-immortalwrt.sh  # 编挂了直接停，不做自动剔�
    `CONFIG_TARGET_DEVICE_qualcommax_ipq60xx_DEVICE_jdcloud_re-cs-02` 至少一个 `=y`
 3. **第 6 步 / 设备自带包没被覆盖**（缺了刷完没 WiFi / LED 屏黑）：
    `ipq-wifi-jdcloud_re-cs-02`、`ath11k-firmware-qcn9074-ddwrt`、`luci-app-athena-led`
-4. **第 6 步 / 基础必需 5 件**：`kmod-nft-queue`、`luci-theme-argon`、`luci-app-argon-config`、
-   `kmod-tun`、`kmod-nft-tproxy`
+4. **第 6 步 / 基础必需 4 件**：`kmod-nft-queue`、`luci-theme-argon`、`kmod-tun`、`kmod-nft-tproxy`
+   ；外加 argon 配置页（判据：`luci-theme-argon=y` 即可，见下方「2026-10 上游变更」）
 5. **第 6 步 / 互斥变体**（仅 `full`）：`dnsmasq-full=y` 且 `dnsmasq=n`、`ip-full=y` 且 `ip-tiny=n`
    （这两组各自 PROVIDES 同一个虚拟包，同时选上会在镜像组装期才崩）
 6. **第 6 步 / `full` 档核心 10 个**：OpenClash、PassWall2、partexp、`dnsmasq_full_nftset`、
@@ -121,6 +121,30 @@ RETRY_ON_FAIL=0 ./build-immortalwrt.sh  # 编挂了直接停，不做自动剔�
 **应用包是软校验，且发生在编译前（第 6 步），不是编完**：脚本会遍历
 `apps-official.config` / `apps-thirdparty.config`，打印「点了 N 个，没进 .config 的 M 个」，
 只报告不中断（包名在分支间偶有差异）。所以「编过了」不等于「包都在」，要对照这段输出。
+
+## 2026-10 上游变更：argon 配置页并入主题（2026-11-19 修复）
+
+上游 `immortalwrt/luci` 在 **2026-10-21** 的 `luci-theme-argon: update to 3.0.0` 提交里，
+把独立的 `applications/luci-app-argon-config` **合并进了 `themes/luci-theme-argon`**：
+
+- 主题包 Makefile 新增 `PKG_PROVIDES:=luci-app-argon-config`、`LUCI_BASENAME:=argon-config`
+- 配置页/菜单/翻译随主题包：`htdocs/luci-static/resources/view/argon-config.js`、
+  `root/usr/share/luci/menu.d/luci-app-argon-config.json`、`po/zh_Hans`
+- `applications/luci-app-argon-config` 目录已删除（主题当前 `3.1.4`，`PKG_RELEASE:=20261113`）
+
+后果：`seed.config` 里那行 `CONFIG_PACKAGE_luci-app-argon-config=y` 的**符号已不存在**，
+`make defconfig` 静默丢掉它，第 6 步硬校验就报「必需包没被选上：luci-app-argon-config」。
+`2026-10-17` 那轮能过、`2026-11-19` 这轮挂掉，原因就是这条上游改动。
+
+修复内容：
+
+1. `seed.config`：删掉 `CONFIG_PACKAGE_luci-app-argon-config=y`（选 `luci-theme-argon` 即带配置页）
+2. `build-immortalwrt.sh` 第 6 步：argon 配置页判据改成「独立包在 **或** 主题在」，两边兼容
+3. `build-immortalwrt.sh` 第 5 步：`make defconfig` 后新增**seed 丢弃报告**，把 seed 里点亮却没进
+   `.config` 的项逐条 `✗` 打出来 —— 这类上游改名/合并会在这一步立刻暴露，而不是等到硬校验报错
+
+> 判断依据记一下：**defconfig 丢弃不存在的符号时不会报错也不会警告**，只会在 `.config` 里消失。
+> 所以 seed 里每写一个 `CONFIG_PACKAGE_xxx=y`，都要有对应的硬校验或丢弃报告兜着。
 
 ## 从 ones20250 吸收的配置（2026-11-19）
 

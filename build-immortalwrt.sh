@@ -208,6 +208,20 @@ if [ "$APPS" = full ]; then
 fi
 make defconfig
 
+# defconfig 对「符号不存在」是**静默丢弃**的：上游改名/合并/删包时，seed 里那一行
+# 就这么消失了，直到第 6 步才以「必需包没被选上」的形式炸出来。
+# 2026-10-21 上游把 applications/luci-app-argon-config 并进 themes/luci-theme-argon
+# 就是这种情况。这里在 defconfig 之后立刻对一遍 seed 里点亮的项，丢掉的直接点名。
+seed_dropped=$(grep -E '^CONFIG_PACKAGE_[^=]+=y$' "$ASSETS/config/seed.config" \
+  | sed -e 's/^CONFIG_PACKAGE_//' -e 's/=y$//' \
+  | while IFS= read -r p; do
+      grep -qx "CONFIG_PACKAGE_${p}=y" .config || echo "$p"
+    done || true)
+if [ -n "$seed_dropped" ]; then
+  echo "  ⚠ seed 里这些项没进 .config（上游改名/合并/删包？确认后再决定删还是换名）："
+  printf '%s\n' "$seed_dropped" | sed 's/^/    ✗ /'
+fi
+
 log "6/8 校验 .config"
 sel() { grep -q "^$1=y$" .config && echo y || echo n; }
 
@@ -224,11 +238,26 @@ for pkg in ipq-wifi-jdcloud_re-cs-02 ath11k-firmware-qcn9074-ddwrt luci-app-athe
 done
 
 # 基础三件：硬校验（缺了这次就白编了）
-for pkg in kmod-nft-queue luci-theme-argon luci-app-argon-config kmod-tun kmod-nft-tproxy; do
+for pkg in kmod-nft-queue luci-theme-argon kmod-tun kmod-nft-tproxy; do
   s=$(sel "CONFIG_PACKAGE_${pkg}")
   echo "  必需 ${pkg}: ${s}"
   [ "$s" = y ] || die "必需包没被选上：${pkg}"
 done
+
+# argon 配置页（LuCI → 系统 → Argon 主题）：判据要跟着上游的打包方式变。
+#   2026-10-21 之前：独立包 applications/luci-app-argon-config
+#   2026-10-21 之后：并入 themes/luci-theme-argon（3.x，PKG_PROVIDES 提供虚名），
+#                    设置页/菜单/翻译都随主题包
+# 所以「主题在」就等价于「配置页在」；独立包若哪天回来也照样认。
+ARGON_CFG=$(sel "CONFIG_PACKAGE_luci-app-argon-config")
+ARGON_THEME=$(sel "CONFIG_PACKAGE_luci-theme-argon")
+if [ "$ARGON_CFG" = y ]; then
+  echo "  argon 配置页：独立包 luci-app-argon-config: y"
+elif [ "$ARGON_THEME" = y ]; then
+  echo "  argon 配置页：随 luci-theme-argon 提供（上游已合并，无独立包）"
+else
+  die "argon 配置页缺失：luci-theme-argon 和 luci-app-argon-config 都没选上"
+fi
 
 # 互斥变体：两个都 y 会导致镜像里两个包抢同一个虚拟名，安装期就崩。
 # 这类错误在编译到 90% 才暴露，所以在动手编之前就拦。
